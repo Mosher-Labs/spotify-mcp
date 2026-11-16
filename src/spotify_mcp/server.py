@@ -41,6 +41,7 @@ TOOL_NAMES = (
     'my_playlists',
     'playlist_items',
     'create_playlist',
+    'rename_playlist',
     'add_tracks',
     'replace_playlist_tracks',
     'reorder_tracks',

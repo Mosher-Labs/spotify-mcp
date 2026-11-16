@@ -210,7 +210,13 @@ async def create_playlist(
     public: bool = False,
     track_ids: list[str] | None = None,
 ) -> dict:
-    """Create a playlist (private by default), optionally with tracks."""
+    """Create a playlist (private by default), optionally with tracks.
+
+    Name run playlists "Run · YYYY-MM-DD · <cadence>": the date of the run and
+    the target cadence in steps per minute, e.g. "Run · 2026-11-16 · 150". They
+    then sort together, oldest first. Spotify's API cannot file playlists into
+    folders, so tell the user to drag new ones into their running folder.
+    """
     uris = _uris(track_ids or [])
     created = await s.spotify.request(
         'POST', '/me/playlists', json={'name': name, 'description': description, 'public': public}
@@ -222,6 +228,20 @@ async def create_playlist(
         'url': created.get('external_urls', {}).get('spotify'),
         'tracks_added': len(uris),
     }
+
+
+async def rename_playlist(
+    s: Services, playlist_id: str, name: str, description: str | None = None
+) -> dict:
+    """Rename a playlist you own, and optionally replace its description.
+
+    Run playlists follow the naming in create_playlist.
+    """
+    body = {'name': name}
+    if description is not None:
+        body['description'] = description
+    await s.spotify.request('PUT', f"/playlists/{playlist_id}", json=body)
+    return {'id': playlist_id, **body}
 
 
 async def _add(s: Services, playlist_id: str, uris: list[str], position: int | None) -> None:
