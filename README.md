@@ -1,108 +1,106 @@
-# basic-repo-template
+# spotify-mcp
 
-![GitHub branch status](https://img.shields.io/github/checks-status/mosher-labs/basic-repo-template/main)
-![GitHub Issues](https://img.shields.io/github/issues/mosher-labs/basic-repo-template)
-![GitHub last commit](https://img.shields.io/github/last-commit/mosher-labs/basic-repo-template)
-![GitHub repo size](https://img.shields.io/github/repo-size/mosher-labs/basic-repo-template)
-![Libraries.io dependency status for GitHub repo](https://img.shields.io/librariesio/github/mosher-labs/basic-repo-template)
-![GitHub License](https://img.shields.io/github/license/mosher-labs/basic-repo-template)
-![GitHub Sponsors](https://img.shields.io/github/sponsors/mosher-labs)
+![GitHub branch status](https://img.shields.io/github/checks-status/mosher-labs/spotify-mcp/main)
+![GitHub last commit](https://img.shields.io/github/last-commit/mosher-labs/spotify-mcp)
+![GitHub License](https://img.shields.io/github/license/mosher-labs/spotify-mcp)
 
-## Introduction
+An MCP server that lets Claude build Spotify playlists for a workout. It picks
+songs from your own top tracks and liked songs, filters them by energy and
+tempo (BPM), and creates or edits playlists in your account.
 
-🚀 This repository serves as a basic template for creating new
-repositories. It's designed to be a foundation for structure and
-organization. 🎯
+Built for one user on a homelab, behind a shared-secret header, with the
+Spotify refresh token stored on a persistent volume. It is not a general
+multi-user service.
 
-### 🌍 Key Features
+## What it does and does not use from Spotify
 
-- 📦 A clean, reusable structure for quick repo setup.
-- 🗣️ Language-specific templates can inherit and extend from this base.
-- 🔄 Easily customizable for various projects and use cases.
+Spotify's audio-features endpoint (BPM, energy) is closed to apps created after
+November 2024, and its February 2026 Development Mode changes cut the search
+limit to 10, removed batch track lookups, and moved playlist writes to
+`/playlists/{id}/items`. This server follows those rules.
 
-### ✨ Perfect for
+- **From Spotify:** search, your top tracks, your liked songs, your playlists,
+  and playlist create and edit.
+- **From ReccoBeats** (`api.reccobeats.com`, no key): tempo and energy per
+  Spotify track ID. Results are cached in SQLite on the data volume. A track
+  ReccoBeats does not know is retried after a week, and `set_track_tempo`
+  records a BPM by hand.
 
-- Developers looking for a clean start 🛠️
-- Language-specific templates 👨‍💻
-- Seamless repository setup for quick deployments ⚡
+## Tools
 
-Feel free to fork, extend, and contribute! 🤝
+| Tool | Purpose |
+|------|---------|
+| `search_tracks` | Catalog search (max 10 per call). |
+| `top_tracks`, `saved_tracks` | Your listening history. |
+| `track_features` | Tempo, energy, danceability, valence, loudness for track IDs. |
+| `set_track_tempo` | Record a BPM by hand. |
+| `candidate_tracks` | Your tracks inside a BPM and energy window, with optional half or double time. |
+| `my_playlists`, `playlist_items` | Read your own playlists. |
+| `log_workout_listening` | After a workout: match the plays in its time window, tie them to it, add the completed ones to the "Workouts" playlist. |
+| `get_track_history`, `get_workout_music_stats`, `listening_status` | What the log says: skips, effort, cadence, tempo bands, keepers. |
+| `create_playlist`, `add_tracks`, `replace_playlist_tracks`, `reorder_tracks`, `remove_tracks` | Edit playlists. |
 
-## Usage
+## Listening log
 
-To use this repository template, simply fork the repo.
+Spotify's recently-played endpoint holds only the last 50 plays. A poller
+thread copies them into `listening.sqlite3` on the data volume every 10
+minutes (`SPOTIFY_MCP_POLL_SECONDS`, 0 turns it off). `log_workout_listening`
+ties the plays in a workout's window to that workout. The log never leaves the
+volume, and nothing in it is sent anywhere except to Claude when a tool is
+called. Delete `listening.sqlite3` to erase it.
+
+Skips are inferred from the time between consecutive plays, because Spotify
+reports no play length. The learning is plain tables and aggregate queries,
+and shows what coincided with a track, not what it caused.
+
+## Configuration
+
+| Variable | Meaning |
+|----------|---------|
+| `SPOTIFY_CLIENT_ID` | From your Spotify developer app. No client secret is used (PKCE). |
+| `SPOTIFY_REDIRECT_URI` | Default `http://127.0.0.1:8888/callback`. Must match the app exactly. |
+| `SPOTIFY_MCP_DATA_DIR` | Where `token.json` and `tempo.sqlite3` live. |
+| `SPOTIFY_MCP_HTTP_TOKEN` | Required unless bound to loopback. Sent as `X-API-Key` or `Authorization: Bearer`. |
+| `SPOTIFY_MCP_HOST`, `SPOTIFY_MCP_PORT` | Default `127.0.0.1`, `8000`. |
+| `SPOTIFY_MCP_STATELESS_HTTP` | Default `true`. |
+| `SPOTIFY_MCP_POLL_SECONDS` | Play-log poll interval. Default `600`; `0` disables. |
+
+## Login
 
 ```bash
-gh repo fork --fork-name <FORK_NAME> --org <ORG_NAME>
+spotify-mcp-auth
 ```
 
-Update the repository settings:
+It prints a URL. Approve in a browser, then paste the address the browser was
+sent to (the page itself fails to load, which is expected).
+
+## Spotify's terms
+
+Spotify's developer terms forbid using Spotify content to train machine
+learning models. This server only passes track names and IDs to the model at
+request time. Read the current terms before widening that use.
+
+## Tests
 
 ```bash
-gh repo edit --add-topic devops,reliability-engineering,axes \
---add-topic infrastructure-as-code,viking,mosher-labs \
---delete-branch-on-merge --enable-discussions=false \
---enable-issues=false --enable-merge-commit=false \
---enable-projects=false --enable-rebase-merge=false \
---enable-wiki=false
+uv sync && uv run pytest
 ```
 
-Create a ruleset for the default branch.
+## Deployment
 
-- Ruleset Name: Default branch
-- Enforcement status: Active
-- Target Branches: Default
-- ✅ Restrict deletions
-- ✅ Require linear history
-- ✅ Require signed commits
-- ✅ Require a pull request before merging
-- ✅ Dismiss stale pull request approvals when new commits are pushed
-- ✅ Require conversation resolution before merging
-- ✅ Request pull request review from Copilot
-- Allowed merge methods: "Squash"
-- ✅ Require status checks to pass
-- ✅ Require branches to be up to date before merging
-- ✅ Do not require status checks on creation
-- Status checks that are required: `pre-commit/pre-commit`
-- ✅ Block force pushes
-- ✅ Require code scanning results
+`homelab-gitops` runs it at `https://spotify.benniemosher.dev/mcp` (see
+`apps/spotify-mcp/RUNBOOK.md` there). Every push to `main` builds
+`ghcr.io/mosher-labs/spotify-mcp:<short sha>`, and the cluster pins the
+digest.
 
-Enable Dependabot.
+## Contributing
 
-- In Github UI, navigate to the repositories Settings > Code security
-- Enable Dependabot security updates
-- Enable Grouped security updates
-- Enable Dependabot version updates
-- Enable Dependabot on Actions runners
-- CodeQL analysis > Set up > Default
-- Enable Secret scanning
-- Enable Push protection
-
-Update the templated information:
-
-### README.md
-
-- [ ] Replace `basic-repo-template` with your `<FORK_NAME>`
-- [ ] Update the "Introduction" section
-- [ ] Update the "Usage" section
-- [ ] Update the "Contributing" section
-
-## 🔰 Contributing
-
-Upon first clone, install the pre-commit hooks.
+Install the pre-commit hooks once after cloning, and run them before each
+commit:
 
 ```bash
 pre-commit install
+pre-commit run --all-files
 ```
 
-To run pre-commit hooks locally, without a git commit.
-
-```bash
-pre-commit run -a --all-files
-```
-
-To update pre-commit hooks, this ideally should be ran before a pull request is merged.
-
-```bash
-pre-commit autoupdate
-```
+Commits follow Conventional Commits, which drives the release workflow.
