@@ -112,3 +112,10 @@ async def test_401_triggers_one_refresh_then_retry(services, recorder):
     await tools.saved_tracks(services)
     hosts = [p for _, p, _ in recorder.calls]
     assert '/api/token' in hosts and hosts[-1] == '/v1/me/tracks'
+
+
+async def test_rename_playlist_puts_name_only_unless_description_given(services, recorder):
+    await tools.rename_playlist(services, 'PL1', 'Run · 2026-11-16 · 150')
+    assert recorder.calls[-1] == ('PUT', '/v1/playlists/PL1', {'name': 'Run · 2026-11-16 · 150'})
+    await tools.rename_playlist(services, 'PL1', 'Run', description='')
+    assert recorder.calls[-1][2] == {'name': 'Run', 'description': ''}

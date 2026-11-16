@@ -45,7 +45,7 @@ limit to 10, removed batch track lookups, and moved playlist writes to
 | `my_playlists`, `playlist_items` | Read your own playlists. |
 | `log_workout_listening` | After a workout: match the plays in its time window, tie them to it, add the completed ones to the "Workouts" playlist. |
 | `get_track_history`, `get_workout_music_stats`, `listening_status` | What the log says: skips, effort, cadence, tempo bands, keepers. |
-| `create_playlist`, `add_tracks`, `replace_playlist_tracks`, `reorder_tracks`, `remove_tracks` | Edit playlists. |
+| `create_playlist`, `rename_playlist`, `add_tracks`, `replace_playlist_tracks`, `reorder_tracks`, `remove_tracks` | Edit playlists. Run playlists are named `Run · YYYY-MM-DD · <cadence>`. |
 
 ## Listening log
 
