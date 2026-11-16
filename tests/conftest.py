@@ -22,6 +22,8 @@ class Recorder:
         self.status_overrides: list[int] = []
         self.recent: list[tuple[str, str, int]] = []  # (track_id, played_at, duration_ms)
         self.playlists = 0
+        self.service_bpm: dict[str, float | None] = {}  # title -> bpm; None means 404
+        self.service_status: int | None = None
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         body = (
@@ -46,6 +48,13 @@ class Recorder:
                 if i in self.tempos
             ]
             return httpx.Response(200, json={'content': content})
+        if host == 'tempo.test':
+            if self.service_status:
+                return httpx.Response(self.service_status, text='x')
+            bpm = self.service_bpm.get(request.url.params['title'])
+            if bpm is None:
+                return httpx.Response(404, json={'detail': 'no iTunes preview found for that track'})
+            return httpx.Response(200, json={'bpm': bpm, 'trust': 'high' if bpm > 100 else 'check'})
         if host == 'accounts.spotify.com':
             return httpx.Response(
                 200, json={'access_token': 'new-access', 'expires_in': 3600}
@@ -55,6 +64,8 @@ class Recorder:
         path = request.url.path
         if path == '/v1/me/top/tracks':
             return httpx.Response(200, json={'items': [track(i) for i in self.top], 'next': None})
+        if path.startswith('/v1/tracks/'):
+            return httpx.Response(200, json=track(path.rsplit('/', 1)[1]))
         if path == '/v1/me/player/recently-played':
             items = [
                 {'played_at': at, 'track': {**track(tid), 'duration_ms': dur}, 'context': None}
@@ -97,3 +108,10 @@ async def services(tmp_path, recorder):
         log=ListeningLog(tmp_path / 'l.sqlite3'),
     )
     await http.aclose()
+
+
+@pytest.fixture
+async def fallback_services(services, tmp_path):
+    """services with the tempo-service fallback on, two lookups per call."""
+    services.tempo = TempoCache(tmp_path / 'f.sqlite3', 'http://tempo.test', fallback_limit=2)
+    return services

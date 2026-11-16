@@ -84,14 +84,16 @@ async def test_tempo_is_cached_and_misses_not_refetched(services, recorder):
     first = len([c for c in recorder.calls if c[1].endswith('audio-features')])
     again = await tools.track_features(services, [IDS[0], IDS[1]])
     assert len([c for c in recorder.calls if c[1].endswith('audio-features')]) == first
-    assert again[IDS[0]]['tempo'] == 150 and again[IDS[1]] is None
+    assert again['features'][IDS[0]]['tempo'] == 150 and again['features'][IDS[1]] is None
+    assert again['pending'] == []
 
 
 async def test_manual_tempo_beats_missing_and_survives(services, recorder):
     await tools.track_features(services, [IDS[1]])  # recorded as a miss
     await tools.set_track_tempo(services, IDS[1], 168, 0.9)
-    got = await tools.track_features(services, [IDS[1]])
+    got = (await tools.track_features(services, [IDS[1]]))['features']
     assert got[IDS[1]]['tempo'] == 168 and got[IDS[1]]['manual'] is True
+    assert got[IDS[1]]['source'] == 'manual'
     with pytest.raises(ValueError):
         await tools.set_track_tempo(services, IDS[1], 10)
 
