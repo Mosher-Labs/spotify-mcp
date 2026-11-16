@@ -8,7 +8,7 @@ import httpx
 from spotify_mcp.history import ListeningLog, to_utc
 from spotify_mcp.poller import poll_once
 
-from spotify_mcp.spotify_api import SpotifyClient, slim_track, track_id, track_uri
+from spotify_mcp.spotify_api import SpotifyClient, SpotifyError, slim_track, track_id, track_uri
 from spotify_mcp.tempo import TempoCache, matching_bpm
 
 TIME_RANGES = ('short_term', 'medium_term', 'long_term')
@@ -54,10 +54,34 @@ async def saved_tracks(s: Services, limit: int = 50, offset: int = 0) -> list[di
     return [slim_track(i['track']) for i in body.get('items', []) if i.get('track')]
 
 
-async def track_features(s: Services, track_ids: list[str]) -> dict[str, dict | None]:
-    """Tempo (BPM), energy, danceability, valence and loudness per track ID."""
+async def _track_name(s: Services, tid: str) -> tuple[str, str] | None:
+    """(first artist, title) for one track. Single-track lookups still work in Dev Mode."""
+    try:
+        track = await s.spotify.request('GET', f"/tracks/{tid}")
+    except SpotifyError:
+        return None  # the track stays pending; a later call tries again
+    artists = track.get('artists') or []
+    if not artists or not track.get('name'):
+        return None
+    return artists[0]['name'], track['name']
+
+
+def _names(tracks: list[dict]) -> dict[str, tuple[str, str]]:
+    return {t['id']: (t['artists'][0], t['name']) for t in tracks if t.get('artists')}
+
+
+async def track_features(s: Services, track_ids: list[str]) -> dict:
+    """Tempo (BPM), energy, danceability, valence and loudness per track ID.
+
+    Each feature carries `source`: "reccobeats", "tempo-service" (BPM measured
+    from the iTunes preview; no energy) or "manual". tempo-service results carry
+    `trust`: "high", or "check" when its two estimators disagree, often at half
+    or double time, so confirm those by ear. A few tempo-service lookups run per
+    call; IDs in `pending` have not been tried yet, so call again for them.
+    """
     ids = [track_id(t) for t in track_ids]
-    return await s.tempo.get_many(s.http, ids)
+    features = await s.tempo.get_many(s.http, ids, name_lookup=lambda tid: _track_name(s, tid))
+    return {'features': features, 'pending': s.tempo.pending(ids)}
 
 
 async def set_track_tempo(
@@ -90,6 +114,9 @@ async def candidate_tracks(
     source: "top" (top tracks across all three time ranges) or "saved" (liked
     songs, newest first, up to `scan`). With half_double_time, a 85 BPM track
     also fits a 170 BPM window. Tracks with no known tempo are counted, not listed.
+    Tempos ReccoBeats lacks come from tempo-service a few per call, with no
+    energy; those tracks match only when no energy filter is set, and
+    `tempo_lookups_pending` says how many are still to try.
     With exclude_skipped, tracks skipped in at least half of 2 or more logged
     workout plays are dropped (see get_track_history). Each match carries its
     workout skip history.
@@ -112,7 +139,7 @@ async def candidate_tracks(
     else:
         raise ValueError('source must be "top" or "saved"')
 
-    features = await s.tempo.get_many(s.http, [t['id'] for t in pool])
+    features = await s.tempo.get_many(s.http, [t['id'] for t in pool], names=_names(pool))
     skips = s.log.skip_stats()
     matches, unknown, dropped = [], 0, 0
     for t in pool:
@@ -122,7 +149,13 @@ async def candidate_tracks(
             continue
         bpm = matching_bpm(f['tempo'], min_bpm, max_bpm, half_double_time)
         energy = f['energy']
-        if bpm is None or energy is None or not min_energy <= energy <= max_energy:
+        if bpm is None:
+            continue
+        # tempo-service gives no energy: such tracks pass only an unfiltered window.
+        if energy is None:
+            if min_energy > 0 or max_energy < 1:
+                continue
+        elif not min_energy <= energy <= max_energy:
             continue
         judged, skipped = skips.get(t['id'], (0, 0))
         if exclude_skipped and judged >= 2 and skipped / judged >= 0.5:
@@ -134,14 +167,19 @@ async def candidate_tracks(
                 'tempo': round(f['tempo'], 1),
                 'fits_at_bpm': bpm,
                 'energy': energy,
+                'tempo_source': f['source'],
+                'tempo_trust': f['trust'],
                 'workout_plays': judged,
                 'workout_skips': skipped,
             }
         )
-    matches.sort(key=lambda m: m['energy'])
+    matches.sort(key=lambda m: (m['energy'] is None, m['energy'] or 0))
+    pending = s.tempo.pending([t['id'] for t in pool])
     return {
         'scanned': len(pool),
         'no_tempo_data': unknown,
+        # Unknown tracks tempo-service has not tried yet; calling again fills more.
+        'tempo_lookups_pending': len(pending),
         'dropped_for_skips': dropped,
         'matches': matches[:limit],
     }

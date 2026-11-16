@@ -15,7 +15,9 @@ claude.ai reaches it with an `X-API-Key` header.
 - **Spotify auth:** PKCE, no client secret. `spotify-mcp-auth` stores the
   refresh token in `token.json` on the data volume, mode 0600
 - **Tempo and energy:** ReccoBeats, because Spotify's audio-features endpoint
-  is closed to apps created after November 2024. Cached in SQLite
+  is closed to apps created after November 2024. On a miss, tempo-service
+  (in-cluster, `TEMPO_SERVICE_URL`) measures BPM from the iTunes preview, a
+  few lookups per call. Cached in SQLite with a `source` per row
 - **Listening log:** a poller stores recently played tracks in
   `listening.sqlite3` on the data volume
 
@@ -29,7 +31,7 @@ spotify-mcp/
 │   ├── spotify_api.py   # Spotify Web API client
 │   ├── spotify_auth.py  # PKCE and token refresh
 │   ├── auth_cli.py      # spotify-mcp-auth
-│   ├── tempo.py         # ReccoBeats lookups and cache
+│   ├── tempo.py         # ReccoBeats + tempo-service lookups and cache
 │   ├── http_auth.py     # X-API-Key / Bearer gate
 │   └── config.py
 ├── tests/

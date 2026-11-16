@@ -25,6 +25,13 @@ limit to 10, removed batch track lookups, and moved playlist writes to
   Spotify track ID. Results are cached in SQLite on the data volume. A track
   ReccoBeats does not know is retried after a week, and `set_track_tempo`
   records a BPM by hand.
+- **From tempo-service** (optional, `TEMPO_SERVICE_URL`): when ReccoBeats has
+  no tempo, [tempo-service](https://github.com/Mosher-Labs/tempo-service)
+  measures the BPM from the track's iTunes preview, looked up by first artist
+  and title. It gives tempo only, no energy, and a `trust` of `high` or
+  `check`. Lookups take 4 to 7 seconds, so each tool call makes at most
+  `TEMPO_SERVICE_MAX_PER_CALL` of them and reports the rest as pending. The
+  artist and title go to tempo-service and on to Apple's iTunes Search API.
 
 ## Tools
 
@@ -32,7 +39,7 @@ limit to 10, removed batch track lookups, and moved playlist writes to
 |------|---------|
 | `search_tracks` | Catalog search (max 10 per call). |
 | `top_tracks`, `saved_tracks` | Your listening history. |
-| `track_features` | Tempo, energy, danceability, valence, loudness for track IDs. |
+| `track_features` | Tempo, energy, danceability, valence, loudness for track IDs, with each tempo's source and the IDs still pending. |
 | `set_track_tempo` | Record a BPM by hand. |
 | `candidate_tracks` | Your tracks inside a BPM and energy window, with optional half or double time. |
 | `my_playlists`, `playlist_items` | Read your own playlists. |
@@ -64,6 +71,8 @@ and shows what coincided with a track, not what it caused.
 | `SPOTIFY_MCP_HOST`, `SPOTIFY_MCP_PORT` | Default `127.0.0.1`, `8000`. |
 | `SPOTIFY_MCP_STATELESS_HTTP` | Default `true`. |
 | `SPOTIFY_MCP_POLL_SECONDS` | Play-log poll interval. Default `600`; `0` disables. |
+| `TEMPO_SERVICE_URL` | tempo-service base URL. Unset turns the fallback off. |
+| `TEMPO_SERVICE_MAX_PER_CALL` | Fallback lookups per tool call. Default `5`. |
 
 ## Login
 

@@ -91,7 +91,12 @@ def main() -> None:
     tokens = TokenStore(settings.token_path, settings.client_id)
     services = tools.Services(
         spotify=SpotifyClient(tokens, http),
-        tempo=TempoCache(settings.tempo_db_path),
+        tempo=TempoCache(
+            settings.tempo_db_path,
+            # In-cluster tempo-service: BPM from iTunes previews when ReccoBeats misses.
+            fallback_url=os.getenv('TEMPO_SERVICE_URL') or None,
+            fallback_limit=int(os.getenv('TEMPO_SERVICE_MAX_PER_CALL', '5')),
+        ),
         http=http,
         log=ListeningLog(settings.log_db_path),
     )
