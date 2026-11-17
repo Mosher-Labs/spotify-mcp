@@ -49,6 +49,30 @@ async def test_service_down_leaves_tracks_pending(fallback_services, recorder):
     assert got['pending'] == []
 
 
+async def test_reccobeats_error_leaves_tracks_pending(fallback_services, recorder):
+    recorder.reccobeats_status = 502
+    got = await tools.track_features(fallback_services, IDS[:2])
+    assert got == {'features': {IDS[0]: None, IDS[1]: None}, 'pending': IDS[:2]}
+    assert service_calls(recorder) == []  # unknown to ReccoBeats is not the same as unanswered
+    recorder.reccobeats_status = None
+    recorder.tempos = {IDS[0]: 150, IDS[1]: 160}
+    got = await tools.track_features(fallback_services, IDS[:2])
+    assert got['pending'] == [] and got['features'][IDS[1]]['tempo'] == 160
+
+
+async def test_reccobeats_error_without_fallback_is_not_a_miss(services, recorder):
+    recorder.reccobeats_status = 503
+    got = await tools.track_features(services, [IDS[0]])
+    assert got['pending'] == [IDS[0]]
+
+
+async def test_fallback_stops_when_out_of_time(tmp_path, services, recorder):
+    services.tempo = TempoCache(tmp_path / 'b.sqlite3', 'http://tempo.test', fallback_budget=0)
+    recorder.service_bpm = {'Song 1': 150}
+    got = await tools.track_features(services, [IDS[0]])
+    assert got['pending'] == [IDS[0]] and service_calls(recorder) == []
+
+
 async def test_misses_from_before_the_fallback_get_one_try(tmp_path, services, recorder):
     path = tmp_path / 'old.sqlite3'
     old = TempoCache(path)  # no fallback: a ReccoBeats miss is final for a week

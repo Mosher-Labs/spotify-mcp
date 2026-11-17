@@ -24,6 +24,7 @@ class Recorder:
         self.playlists = 0
         self.service_bpm: dict[str, float | None] = {}  # title -> bpm; None means 404
         self.service_status: int | None = None
+        self.reccobeats_status: int | None = None
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         body = (
@@ -34,6 +35,8 @@ class Recorder:
         self.calls.append((request.method, request.url.path, body))
         host = request.url.host
         if host == 'api.reccobeats.com':
+            if self.reccobeats_status:
+                return httpx.Response(self.reccobeats_status, text='x')
             ids = request.url.params['ids'].split(',')
             content = [
                 {

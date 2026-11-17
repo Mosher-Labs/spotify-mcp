@@ -17,7 +17,8 @@ claude.ai reaches it with an `X-API-Key` header.
 - **Tempo and energy:** ReccoBeats, because Spotify's audio-features endpoint
   is closed to apps created after November 2024. On a miss, tempo-service
   (in-cluster, `TEMPO_SERVICE_URL`) measures BPM from the iTunes preview, a
-  few lookups per call. Cached in SQLite with a `source` per row
+  few lookups per call. A source error leaves tracks pending for the next call.
+  Cached in SQLite with a `source` per row
 - **Listening log:** a poller stores recently played tracks in
   `listening.sqlite3` on the data volume
 

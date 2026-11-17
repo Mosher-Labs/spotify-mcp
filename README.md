@@ -30,8 +30,12 @@ limit to 10, removed batch track lookups, and moved playlist writes to
   measures the BPM from the track's iTunes preview, looked up by first artist
   and title. It gives tempo only, no energy, and a `trust` of `high` or
   `check`. Lookups take 4 to 7 seconds, so each tool call makes at most
-  `TEMPO_SERVICE_MAX_PER_CALL` of them and reports the rest as pending. The
-  artist and title go to tempo-service and on to Apple's iTunes Search API.
+  `TEMPO_SERVICE_MAX_PER_CALL` of them, within 60 seconds, and reports the
+  rest as pending. The artist and title go to tempo-service and on to Apple's
+  iTunes Search API.
+- **When a source errors:** the tool call still returns. Tracks ReccoBeats or
+  tempo-service did not answer are listed as pending, and the next call
+  retries them.
 
 ## Tools
 
