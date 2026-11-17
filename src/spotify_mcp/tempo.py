@@ -6,7 +6,8 @@ needs no key. When ReccoBeats does not know a track and TEMPO_SERVICE_URL is
 set, tempo-service (Mosher-Labs/tempo-service, in-cluster) measures the BPM
 from the iTunes preview by artist and title. It gives tempo only, no energy.
 Manual overrides win over anything fetched, and a track no source knows is
-remembered as a miss for a week.
+remembered as a miss for a week. When a source errors, the tracks it did not
+answer stay pending and a later call retries them.
 """
 
 import re
@@ -23,6 +24,9 @@ MISS_TTL_SECONDS = 7 * 24 * 3600
 # tempo-service waits ~3.5 s between iTunes calls, so a lookup takes 4-7 s
 # and longer when iTunes backs off.
 FALLBACK_TIMEOUT_SECONDS = 90
+# Total time one call may spend on tempo-service lookups, so a tool call
+# finishes well inside the MCP client's timeout.
+FALLBACK_BUDGET_SECONDS = 60
 _SPOTIFY_ID = re.compile(r'/track/([A-Za-z0-9]{22})')
 FIELDS = ('tempo', 'energy', 'danceability', 'valence', 'loudness')
 
@@ -31,9 +35,16 @@ NameLookup = Callable[[str], Awaitable[tuple[str, str] | None]]
 
 
 class TempoCache:
-    def __init__(self, path: Path, fallback_url: str | None = None, fallback_limit: int = 5):
+    def __init__(
+        self,
+        path: Path,
+        fallback_url: str | None = None,
+        fallback_limit: int = 5,
+        fallback_budget: float | None = FALLBACK_BUDGET_SECONDS,
+    ):
         self._fallback_url = fallback_url.rstrip('/') if fallback_url else None
         self._fallback_limit = fallback_limit
+        self._fallback_budget = fallback_budget
         self._db = sqlite3.connect(path)
         self._db.execute(
             'CREATE TABLE IF NOT EXISTS features ('
@@ -107,12 +118,14 @@ class TempoCache:
         """IDs with no cached tempo and no recent miss: a later call may still fill them."""
         return [t for t in dict.fromkeys(track_ids) if self._cached(t) is None and not self._recent_miss(t)]
 
-    async def _ask_tempo_service(self, http: httpx.AsyncClient, artist: str, title: str) -> dict | None:
+    async def _ask_tempo_service(
+        self, http: httpx.AsyncClient, artist: str, title: str, timeout: float
+    ) -> dict | None:
         """BPM from tempo-service; None if it has no preview for the track. Raises if it is unreachable."""
         response = await http.get(
             f"{self._fallback_url}/bpm",
             params={'artist': artist, 'title': title},
-            timeout=FALLBACK_TIMEOUT_SECONDS,
+            timeout=timeout,
         )
         if response.status_code == 404:
             return None
@@ -130,11 +143,12 @@ class TempoCache:
 
         names maps track ID to (artist, title) for the tempo-service fallback;
         name_lookup fetches it for IDs not in names. Each call makes at most
-        fallback_limit fallback lookups. The rest stay unrecorded, so pending()
-        lists them and a later call picks them up.
+        fallback_limit fallback lookups, within fallback_budget seconds. Tracks
+        not answered because of that cap, or because a source errored, stay
+        unrecorded, so pending() lists them and a later call picks them up.
         """
         names = names or {}
-        result: dict[str, dict | None] = {}
+        result: dict[str, dict | None] = {tid: None for tid in track_ids}
         missing: list[str] = []
         for tid in dict.fromkeys(track_ids):
             cached = self._cached(tid)
@@ -148,8 +162,11 @@ class TempoCache:
         unknown: list[str] = []
         for start in range(0, len(missing), BATCH):
             batch = missing[start : start + BATCH]
-            response = await http.get(RECCOBEATS, params={'ids': ','.join(batch)})
-            response.raise_for_status()
+            try:
+                response = await http.get(RECCOBEATS, params={'ids': ','.join(batch)})
+                response.raise_for_status()
+            except httpx.HTTPError:
+                break  # down or erroring: this batch and the rest stay pending
             found: dict[str, dict] = {}
             for item in response.json().get('content', []):
                 match = _SPOTIFY_ID.search(item.get('href', ''))
@@ -161,7 +178,6 @@ class TempoCache:
                     result[tid] = self._cached(tid)
                 else:
                     unknown.append(tid)
-                    result[tid] = None
             self._db.commit()
 
         if not self._fallback_url:
@@ -170,14 +186,20 @@ class TempoCache:
             self._db.commit()
             return result
 
+        deadline = None if self._fallback_budget is None else time.monotonic() + self._fallback_budget
         for tid in unknown[: self._fallback_limit]:
+            timeout = FALLBACK_TIMEOUT_SECONDS
+            if deadline is not None:
+                timeout = min(timeout, deadline - time.monotonic())
+                if timeout <= 0:
+                    break  # out of time: the rest stay pending
             name = names.get(tid)
             if name is None and name_lookup is not None:
                 name = await name_lookup(tid)
             if name is None:
                 continue
             try:
-                found = await self._ask_tempo_service(http, *name)
+                found = await self._ask_tempo_service(http, *name, timeout)
             except httpx.HTTPError:
                 break  # down or rate-limited: leave the rest pending for a later call
             if found is None:
