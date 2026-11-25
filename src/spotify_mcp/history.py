@@ -225,12 +225,20 @@ class ListeningLog:
         reading of played_at is in use.
         """
         rows = self._db.execute(
-            """SELECT wp.played_at, wp.track_id, wp.listened_ms, p.name, p.artists, p.duration_ms
+            """SELECT wp.played_at, wp.track_id, wp.listened_ms, p.name, p.artists, p.duration_ms,
+                      p.context_uri
                FROM workout_plays wp
                JOIN plays p ON p.played_at = wp.played_at AND p.track_id = wp.track_id
                WHERE wp.workout_id=? ORDER BY wp.played_at""",
             (workout_id,),
         ).fetchall()
+        return self._spans([dict(r) for r in rows])
+
+    def window_play_spans(self, start: str, end: str, grace: timedelta) -> list[dict]:
+        """Like workout_play_spans, for plays in a window not logged as a workout."""
+        return self._spans(self.window_plays(start, end, grace))
+
+    def _spans(self, rows: list[dict]) -> list[dict]:
         sem = self.semantics()
         out = []
         for r in rows:
@@ -241,6 +249,8 @@ class ListeningLog:
                 'track_id': r['track_id'],
                 'name': r['name'] or '',
                 'artists': json.loads(r['artists'] or '[]'),
+                # Where the play started from, e.g. spotify:playlist:<id>; None if unknown.
+                'context_uri': r.get('context_uri'),
                 'start': start,
                 'end': end,
             })

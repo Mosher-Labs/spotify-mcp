@@ -330,6 +330,7 @@ async def test_tool_registered_only_with_strava(services, tmp_path, processor):
     listed = {t.name: t for t in await with_strava.list_tools()}
     props = listed['set_strava_description'].inputSchema['properties']
     assert set(props) == {'activity_id', 'text', 'mode'}
+    assert '"block"' in listed['set_strava_description'].description
     without = server.build_server(services, tokens, '127.0.0.1', 8000, True)
     assert 'set_strava_description' not in {t.name for t in await without.list_tools()}
 
@@ -374,11 +375,15 @@ async def test_webhook_writes_summary_once_when_enabled(processor, fake, recorde
     assert result['status'] == 'logged' and result['description'] == 'written'
     desc = fake.activities[AID]['description']
     assert desc.startswith('Felt good.\n\n🎧 6 tracks, all Artist. HR peaked at 171 on "Song ')
-    # A missed create retried by an update must not add a second line.
+    # No playlist context on these plays, so the Workouts playlist is linked.
+    assert desc.endswith('\n\n1. Artist – Song 1\n2. Artist – Song 2\n3. Artist – Song 3\n'
+                         '4. Artist – Song 4\n5. Artist – Song 5\n6. Artist – Song 6\n\n'
+                         'Playlist: https://open.spotify.com/playlist/PL1')
+    # A missed create retried by an update rewrites the same block: no second one.
     services.log.set_strava_event(str(AID), 'error', {})
     result = await processor.handle(event('update'))
-    assert result['description'] == 'skipped: summary already present'
-    assert len(fake.puts) == 1
+    assert result['description'] == 'unchanged'
+    assert len(fake.puts) == 1 and fake.activities[AID]['description'] == desc
 
 
 async def test_webhook_leaves_description_alone_by_default(processor, fake, recorder):
@@ -406,3 +411,123 @@ def test_write_descriptions_env(monkeypatch, tmp_path):
     assert strava.load_strava_settings(tmp_path).write_descriptions is False
     monkeypatch.setenv('STRAVA_WRITE_DESCRIPTIONS', 'true')
     assert strava.load_strava_settings(tmp_path).write_descriptions is True
+
+
+# --- the music block --------------------------------------------------------
+
+BLOCK = '🎧 2 tracks.\n\n1. A – x\n2. B – y\n\nPlaylist: https://open.spotify.com/playlist/P1'
+
+
+def test_block_lists_tracks_in_play_order_and_links_playlist():
+    played = spans('Roll Up and Smile', 'The Calm', artists={'The Calm': 'Drake'})
+    assert strava.build_block('🎧 2 tracks.', played, 'P1') == (
+        '🎧 2 tracks.\n\n1. Wiz Khalifa – Roll Up and Smile\n2. Drake – The Calm\n\n'
+        'Playlist: https://open.spotify.com/playlist/P1')
+    assert strava.build_block('🎧 2 tracks.', played, None) == (
+        '🎧 2 tracks.\n\n1. Wiz Khalifa – Roll Up and Smile\n2. Drake – The Calm')
+
+
+def test_block_shortens_a_long_list():
+    played = spans(*[f"Song number {i}" for i in range(80)], step=1)
+    block = strava.build_block('🎧 80 tracks.', played, 'P1', max_chars=400)
+    assert len(block) <= 400
+    lines = block.split('\n')
+    assert lines[-3].startswith('…and ') and lines[-3].endswith(' more')
+    shown = sum(1 for line in lines if line[:1].isdigit())
+    assert lines[-3] == f"…and {80 - shown} more" and lines[2] == '1. Wiz Khalifa – Song number 0'
+    assert lines[-1] == 'Playlist: https://open.spotify.com/playlist/P1'
+
+
+def test_playlist_is_the_context_of_most_plays_else_workouts():
+    played = spans('a', 'b', 'c')
+    assert strava.playlist_for(played, 'W') == 'W'
+    for s, uri in zip(played, ['spotify:playlist:P1', 'spotify:playlist:P1', 'spotify:album:X']):
+        s['context_uri'] = uri
+    assert strava.playlist_for(played, 'W') == 'P1'
+    played[1]['context_uri'] = None  # one of three is not "most"
+    assert strava.playlist_for(played, 'W') == 'W'
+    assert strava.playlist_for(played, None) is None
+
+
+@pytest.mark.parametrize('current, expected', [
+    ('', BLOCK),
+    ('Felt good.', 'Felt good.\n\n' + BLOCK),
+    ('🎧 old line by hand.', BLOCK),
+    ('Before.\n\n🎧 old.\n\n1. Z – z\n…and 3 more\n\nPlaylist: https://open.spotify.com/playlist/OLD'
+     '\n\nAfter.', 'Before.\n\n' + BLOCK + '\n\nAfter.'),
+    ('Spotify Playlist: https://open.spotify.com/playlist/6LP\n\n🎧 11 tracks, NF to Justin Bieber.',
+     'Spotify Playlist: https://open.spotify.com/playlist/6LP\n\n' + BLOCK),
+    ('🎧 old.\nMy own note.', BLOCK + '\nMy own note.'),
+])
+def test_block_mode_replaces_only_our_block(current, expected):
+    assert strava.merge_description(current, BLOCK, 'block') == expected
+    # Idempotent: writing the same block again changes nothing.
+    assert strava.merge_description(expected, BLOCK, 'block') == expected
+
+
+def test_block_mode_needs_the_mark():
+    with pytest.raises(ValueError):
+        strava.merge_description('x', 'no mark', 'block')
+
+
+async def test_block_mode_writes_once(processor, fake):
+    fake.activities[AID] = {**activity(), 'description': 'Note.\n\n🎧 by hand.'}
+    first = await strava.set_strava_description(processor.client, AID, BLOCK, mode='block')
+    assert first['changed'] and fake.activities[AID]['description'] == 'Note.\n\n' + BLOCK
+    again = await strava.set_strava_description(processor.client, AID, BLOCK, mode='block')
+    assert again['changed'] is False and len(fake.puts) == 1
+
+
+async def test_webhook_links_the_playlist_the_plays_came_from(processor, fake, recorder):
+    processor.settings = dataclasses.replace(processor.settings, write_descriptions=True)
+    fake.activities[AID] = activity()
+    recorder.context = 'spotify:playlist:RUN1'
+    plays_during(recorder, 0, 3)
+    await processor.handle(event())
+    assert fake.activities[AID]['description'].endswith(
+        '\n\nPlaylist: https://open.spotify.com/playlist/RUN1')
+
+
+async def test_backfill_keeps_hand_summary_and_text_and_writes_only_when_asked(
+        processor, fake, services):
+    hand = '🎧 Wiz Khalifa for 2 of 3 tracks. Fastest interval (9:43/mi) on "Song 2".'
+    fake.activities[AID] = {**activity(), 'description': 'Spotify Playlist: mine\n\n' + hand}
+    # Plays stored by an earlier poll; this activity was never logged as a workout.
+    services.log.add_plays([
+        {'played_at': at(m), 'track': {'id': IDS[i], 'name': f"Song {i + 1}", 'duration_ms': 200_000,
+                                       'artists': [{'name': 'Wiz Khalifa'}]},
+         'context': {'uri': 'spotify:playlist:RUN1'}}
+        for i, m in enumerate((4, 8, 12))])
+    services.log.add_plays([{'played_at': at(90), 'track': {'id': IDS[4], 'duration_ms': 1}}])
+    expected = ('Spotify Playlist: mine\n\n' + hand + '\n\n1. Wiz Khalifa – Song 1\n'
+                '2. Wiz Khalifa – Song 2\n3. Wiz Khalifa – Song 3\n\n'
+                'Playlist: https://open.spotify.com/playlist/RUN1')
+    preview = await strava.rebuild_description(processor.client, services.log, AID)
+    assert preview['plays_from'] == 'activity window' and preview['plays'] == 3
+    assert preview['summary'] == 'kept' and preview['description'] == expected
+    assert fake.puts == []
+    done = await strava.rebuild_description(processor.client, services.log, AID, write=True)
+    assert done['written'] and fake.activities[AID]['description'] == expected
+    again = await strava.rebuild_description(processor.client, services.log, AID, write=True)
+    assert again['changed'] is False and len(fake.puts) == 1
+    regen = await strava.rebuild_description(processor.client, services.log, AID, keep_summary=False)
+    assert regen['summary'] == 'generated'
+    assert regen['description'].startswith('Spotify Playlist: mine\n\n🎧 3 tracks, all Wiz Khalifa.\n\n1.')
+
+
+async def test_backfill_with_no_plays_changes_nothing(processor, fake, services):
+    fake.activities[AID] = {**activity(), 'description': '🎧 by hand.'}
+    result = await strava.rebuild_description(processor.client, services.log, AID, write=True)
+    assert result['changed'] is False and result['plays'] == 0 and fake.puts == []
+
+
+async def test_token_reread_from_disk_before_refresh(processor, fake, tmp_path):
+    tokens = processor.client.tokens
+    await tokens.access_token(processor.client._http)  # cache the file in memory
+    # Another process refreshed meanwhile; our cached copy is expired.
+    tokens._data['expires_at'] = 0
+    strava._write_private(tmp_path / 'strava_token.json', {
+        'access_token': 'from-cli', 'refresh_token': 'cli-rotated',
+        'expires_at': int(time.time()) + 3600, 'athlete_id': ATHLETE})
+    assert await tokens.access_token(processor.client._http) == 'from-cli'
+    assert ('POST', '/oauth/token') not in fake.calls

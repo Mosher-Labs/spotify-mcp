@@ -10,8 +10,12 @@ Strava does not sign events, so nothing in the payload is trusted beyond
 start time, duration and name come from Strava's API, not the POST body.
 
 With activity:write, ``set_strava_description`` edits an activity's
-description, and STRAVA_WRITE_DESCRIPTIONS=true appends a one-line music
-summary after each webhook-logged activity.
+description, and STRAVA_WRITE_DESCRIPTIONS=true writes a music block (summary
+line, numbered track list, playlist link) after each webhook-logged activity.
+The block is replaced in place on later writes; text around it is kept.
+
+Strava's API reference gives no length limit for ``description`` (checked
+2026-11-25), so the block is capped at BLOCK_MAX_CHARS by shortening the list.
 
 Docs (checked 2026-11-25):
 https://developers.strava.com/docs/webhooks/
@@ -23,6 +27,7 @@ import asyncio
 import hmac
 import json
 import os
+import re
 import sys
 import time
 from dataclasses import dataclass
@@ -33,7 +38,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 import httpx
 
 from spotify_mcp import tools
-from spotify_mcp.history import to_utc
+from spotify_mcp.history import ListeningLog, to_utc
 
 AUTH_URL = 'https://www.strava.com/oauth/authorize'
 TOKEN_URL = 'https://www.strava.com/oauth/token'
@@ -46,8 +51,15 @@ DEFAULT_REDIRECT_URI = 'http://localhost/exchange_token'
 SCOPES = ('activity:read_all', 'activity:write')
 SCOPE = ','.join(SCOPES)
 
-# Marks the automatic music summary; its presence means "already written".
+# Starts the automatic music block. The block runs from the 🎧 line through
+# the track list and the Playlist line; mode="block" replaces only that.
 SUMMARY_MARK = '🎧'
+PLAYLIST_URL = 'https://open.spotify.com/playlist/'
+# Strava documents no description limit; this keeps our part of it modest.
+BLOCK_MAX_CHARS = 1500
+_TRACK_LINE = re.compile(r'^\d+\. \S')
+_MORE_LINE = re.compile(r'^…and \d+ more\.?$')
+_PLAYLIST_LINE = re.compile(r'^Playlist: ' + re.escape(PLAYLIST_URL) + r'\S+$')
 METERS_PER_MILE = 1609.344
 # Laps shorter than this are button-press stubs, not intervals.
 _MIN_LAP_METERS = 200
@@ -211,6 +223,12 @@ class StravaTokenStore:
             data = self._load()
             if not force and data['expires_at'] - _EXPIRY_SKEW_SECONDS > time.time():
                 return data['access_token']
+            # Another process (the backfill CLI, a new login) may have
+            # refreshed and rotated the refresh token, so read the file again.
+            self._data = None
+            data = self._load()
+            if not force and data['expires_at'] - _EXPIRY_SKEW_SECONDS > time.time():
+                return data['access_token']
             payload = await self._post_token(
                 http, {'grant_type': 'refresh_token', 'refresh_token': data['refresh_token']}
             )
@@ -301,6 +319,59 @@ class StravaClient:
 
 # --- Descriptions ----------------------------------------------------------
 
+def find_block(lines: list[str]) -> tuple[int, int] | None:
+    """[start, end) of the music block in description lines, or None.
+
+    The block is the first line starting with 🎧, then any blank, numbered
+    track ("1. ..."), "…and N more" lines, ending at our Playlist line if one
+    follows. Anything else ends it, so text after the block is not touched.
+    """
+    start = next((i for i, line in enumerate(lines) if line.lstrip().startswith(SUMMARY_MARK)), None)
+    if start is None:
+        return None
+    last = start
+    for j in range(start + 1, len(lines)):
+        line = lines[j].strip()
+        if not line:
+            continue
+        if _TRACK_LINE.match(line) or _MORE_LINE.match(line):
+            last = j
+            continue
+        if _PLAYLIST_LINE.match(line):
+            last = j
+        break
+    return start, last + 1
+
+
+def existing_summary(description: str) -> str | None:
+    """The 🎧 line already in a description, or None."""
+    lines = description.splitlines()
+    found = find_block(lines)
+    return lines[found[0]].strip() if found else None
+
+
+def merge_description(current: str, text: str, mode: str) -> str:
+    """The description after writing text with mode append, replace or block."""
+    if mode not in ('append', 'replace', 'block'):
+        raise ValueError('mode must be "append", "replace" or "block"')
+    text = text.strip()
+    if mode == 'replace':
+        return text
+    if not text:
+        raise ValueError('text is empty')
+    if mode == 'block':
+        if not text.startswith(SUMMARY_MARK):
+            raise ValueError(f'a block must start with {SUMMARY_MARK}')
+        lines = current.splitlines()
+        found = find_block(lines)
+        if found:
+            start, end = found
+            return '\n'.join(lines[:start] + text.split('\n') + lines[end:])
+    elif text in current:
+        return current
+    return f"{current.rstrip()}\n\n{text}" if current.strip() else text
+
+
 async def set_strava_description(
     client: StravaClient, activity_id: int, text: str, mode: str = 'append'
 ) -> dict:
@@ -309,22 +380,18 @@ async def set_strava_description(
     mode "append" (default) adds text below the existing description after a
     blank line, and does nothing if that exact text is already there, so
     calling it twice is safe. mode "replace" overwrites the description.
+    mode "block" takes a music block starting with 🎧 and swaps it for the
+    one already there (the 🎧 line, its numbered track list and its
+    "Playlist: https://open.spotify.com/playlist/..." line), keeping any
+    other text; with no block there yet, it appends.
     """
-    if mode not in ('append', 'replace'):
-        raise ValueError('mode must be "append" or "replace"')
-    text = text.strip()
-    if not text and mode == 'append':
-        raise ValueError('text is empty')
+    if mode not in ('append', 'replace', 'block'):
+        raise ValueError('mode must be "append", "replace" or "block"')
     activity = await client.activity(int(activity_id))
     if activity is None:
         raise StravaError(f"Strava activity {activity_id} not found.")
     current = activity.get('description') or ''
-    if mode == 'replace':
-        new = text
-    elif text in current:
-        new = current
-    else:
-        new = f"{current.rstrip()}\n\n{text}" if current.strip() else text
+    new = merge_description(current, text, mode)
     if new == current:
         return {'activity_id': int(activity_id), 'changed': False, 'description': current}
     updated = await client.set_description(int(activity_id), new)
@@ -423,6 +490,103 @@ def build_summary(activity: dict, spans: list[dict], laps: list[dict], streams: 
     if parts:
         line += ' ' + '; '.join(parts) + '.'
     return line
+
+
+def playlist_for(spans: list[dict], workouts_playlist_id: str | None) -> str | None:
+    """The playlist ID to link: the one most plays came from, else Workouts.
+
+    A playlist counts only if it was the context of more than half the plays.
+    Plays logged before context was stored, or started from an album, an
+    artist or Liked Songs, have no playlist and fall back to Workouts.
+    """
+    ids = [uri.rsplit(':', 1)[1] for uri in (s.get('context_uri') or '' for s in spans)
+           if ':playlist:' in uri]
+    for pid in dict.fromkeys(ids):
+        if ids.count(pid) * 2 > len(spans):
+            return pid
+    return workouts_playlist_id
+
+
+def build_block(summary: str, spans: list[dict], playlist_id: str | None,
+                max_chars: int = BLOCK_MAX_CHARS) -> str:
+    """Summary line, numbered tracks in play order, and the playlist link.
+
+    If the block would pass max_chars, the list ends early with "…and N more".
+    """
+    tracks = [f"{i}. {(s['artists'] or ['?'])[0]} – {s['name'] or '?'}"
+              for i, s in enumerate(spans, 1)]
+    tail = ['', f"Playlist: {PLAYLIST_URL}{playlist_id}"] if playlist_id else []
+
+    def render(n: int) -> str:
+        more = [f"…and {len(tracks) - n} more"] if n < len(tracks) else []
+        return '\n'.join([summary, '', *tracks[:n], *more, *tail])
+
+    n = len(tracks)
+    while n > 0 and len(render(n)) > max_chars:
+        n -= 1
+    return render(n)
+
+
+async def description_block(client: StravaClient, log: ListeningLog, activity: dict,
+                            spans: list[dict], summary: str | None = None) -> str | None:
+    """The music block for an activity, or None with no plays.
+
+    With summary given, it is used as the 🎧 line as is. Otherwise the line is
+    built from laps and the HR stream; if Strava fails on either, that part is
+    left out.
+    """
+    if not spans:
+        return None
+    if summary is None:
+        aid = int(activity['id'])
+        try:
+            laps = await client.laps(aid)
+        except (StravaError, httpx.HTTPError):
+            laps = []
+        try:
+            streams = await client.streams(aid, ['time', 'heartrate'])
+        except (StravaError, httpx.HTTPError):
+            streams = {}
+        summary = build_summary(activity, spans, laps, streams)
+    if not summary:
+        return None
+    return build_block(summary, spans, playlist_for(spans, log.meta('workouts_playlist_id')))
+
+
+async def rebuild_description(client: StravaClient, log: ListeningLog, activity_id: int,
+                              write: bool = False, keep_summary: bool = True,
+                              grace_minutes: int = 5) -> dict:
+    """Rebuild one activity's music block from the listening log (backfill).
+
+    Plays come from the workout logged under this activity ID, or, if there
+    is none, from the stored plays inside the activity's time window. With
+    keep_summary, a 🎧 line already in the description is kept word for word
+    and only the track list and link are rebuilt. Nothing is written unless
+    write is true; the result shows the description either way.
+    """
+    aid = int(activity_id)
+    activity = await client.activity(aid)
+    if activity is None:
+        raise StravaError(f"Strava activity {aid} not found.")
+    spans, source = log.workout_play_spans(str(aid)), 'logged workout'
+    if not spans:
+        start, end = window(activity)
+        spans = log.window_play_spans(to_utc(start), to_utc(end), timedelta(minutes=grace_minutes))
+        source = 'activity window'
+    current = activity.get('description') or ''
+    result: dict = {'activity_id': aid, 'plays': len(spans), 'plays_from': source}
+    kept = existing_summary(current) if keep_summary else None
+    block = await description_block(client, log, activity, spans, kept)
+    if not block:
+        return {**result, 'changed': False, 'written': False, 'description': current,
+                'note': 'no plays stored for this activity'}
+    new = merge_description(current, block, 'block')
+    result.update(summary='kept' if kept else 'generated', changed=new != current,
+                  written=False, description=new)
+    if write and new != current:
+        await client.set_description(aid, new)
+        result['written'] = True
+    return result
 
 
 # --- Webhook events --------------------------------------------------------
@@ -576,31 +740,20 @@ class WebhookProcessor:
         return result
 
     async def write_summary(self, activity: dict, key: str) -> str:
-        """Append the music summary unless one is there already. Returns what happened.
+        """Write or replace the music block. Returns what happened.
 
-        Laps and streams are optional: if Strava fails on either, that part of
-        the line is left out. A failure to write never fails the logging.
+        A failure to write never fails the logging.
         """
-        if SUMMARY_MARK in (activity.get('description') or ''):
-            return 'skipped: summary already present'
         aid = int(activity['id'])
         spans = self.s.log.workout_play_spans(key)
-        try:
-            laps = await self.client.laps(aid)
-        except (StravaError, httpx.HTTPError):
-            laps = []
-        try:
-            streams = await self.client.streams(aid, ['time', 'heartrate'])
-        except (StravaError, httpx.HTTPError):
-            streams = {}
-        line = build_summary(activity, spans, laps, streams)
-        if not line:
+        block = await description_block(self.client, self.s.log, activity, spans)
+        if not block:
             return 'skipped: no plays'
         try:
-            await set_strava_description(self.client, aid, line)
+            written = await set_strava_description(self.client, aid, block, mode='block')
         except (StravaError, httpx.HTTPError) as exc:
             return f"error: {str(exc)[:200]}"
-        return 'written'
+        return 'written' if written['changed'] else 'unchanged'
 
     def possible_gap(self, start_at: str) -> str | None:
         """Explain if plays from the start of the workout may have rolled off.

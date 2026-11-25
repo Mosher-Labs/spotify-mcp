@@ -50,7 +50,7 @@ limit to 10, removed batch track lookups, and moved playlist writes to
 | `log_workout_listening` | After a workout: match the plays in its time window, tie them to it, add the completed ones to the "Workouts" playlist. |
 | `get_track_history`, `get_workout_music_stats`, `listening_status` | What the log says: skips, effort, cadence, tempo bands, keepers. |
 | `create_playlist`, `rename_playlist`, `add_tracks`, `replace_playlist_tracks`, `reorder_tracks`, `remove_tracks` | Edit playlists. Run playlists are named `Run · YYYY-MM-DD · <cadence>`. |
-| `set_strava_description` | Write a Strava activity's description. `mode="append"` (default) adds the text below what is there, once; `mode="replace"` overwrites it. Only listed when the Strava variables are set. |
+| `set_strava_description` | Write a Strava activity's description. `mode="append"` (default) adds the text below what is there, once; `mode="replace"` overwrites it; `mode="block"` swaps the 🎧 music block for a new one and keeps the rest. Only listed when the Strava variables are set. |
 
 ## Listening log
 
@@ -80,20 +80,50 @@ the workout only if Strava confirms the activity is gone; plays and the
 playlist are kept. `listening_status` shows the last event in
 `strava_last_event`.
 
-**Music summary.** With `STRAVA_WRITE_DESCRIPTIONS=true`, each newly logged
-activity also gets one line appended to its Strava description, for example:
+**Music block.** With `STRAVA_WRITE_DESCRIPTIONS=true`, each newly logged
+activity also gets a music block in its Strava description, for example:
 
 ```text
 🎧 Wiz Khalifa for 4 of 5 tracks. Fastest lap (9:43/mi) on "Financial Advice" → "The Calm"; HR peaked at 156 on "Lost on the Road".
+
+1. Wiz Khalifa – Roll Up and Smile
+2. Wiz Khalifa – Financial Advice
+3. Wiz Khalifa – The Calm
+4. Wiz Khalifa – Lost on the Road
+5. Taylor Gang – Taylor Gang
+
+Playlist: https://open.spotify.com/playlist/<id>
 ```
 
-Every number is measured: the plays in the log, the fastest of Strava's laps
-(two or more laps of at least 200 m, foot sports only), and the peak of the
-heart-rate stream, each matched to the song playing at that time. If Strava
-has no laps or no heart rate, that part is left out. A description that
-already holds a 🎧 line is left alone, so retries never add a second line. A
-failed write shows in the event result as `description: error: ...` and does
-not undo the logging.
+Every number in the first line is measured: the plays in the log, the fastest
+of Strava's laps (two or more laps of at least 200 m, foot sports only), and
+the peak of the heart-rate stream, each matched to the song playing at that
+time. If Strava has no laps or no heart rate, that part is left out.
+
+The tracks are every play in the workout's window, in play order. The link
+goes to the playlist the plays were started from, if more than half of them
+came from one playlist (Spotify's recently-played `context`, stored with each
+play). Otherwise it goes to the "Workouts" playlist. Strava's API reference
+gives no length limit for descriptions, so the block is capped at 1,500
+characters and a longer list ends with `…and N more`.
+
+The block runs from the 🎧 line through the track list and the `Playlist:`
+line. Writing it again replaces only that part, so retries never add a second
+block and text written before or after it is kept. A failed write shows in the
+event result as `description: error: ...` and does not undo the logging.
+
+**Backfill.** `spotify-mcp-strava-backfill` rebuilds the block for past
+activities from the listening log. Plays come from the workout logged under
+that activity ID, or from the stored plays inside the activity's time window.
+A 🎧 line already there is kept word for word unless `--regenerate-summary` is
+given. It prints the new descriptions and writes nothing without `--write`:
+
+```bash
+kubectl exec -n spotify-mcp deploy/spotify-mcp -c app -- \
+  spotify-mcp-strava-backfill 20987536751 21013702441
+kubectl exec -n spotify-mcp deploy/spotify-mcp -c app -- \
+  spotify-mcp-strava-backfill --write 20987536751 21013702441
+```
 
 **The 50-play limit.** At about 3.5 minutes a track, 50 plays is about three
 hours of continuous listening. Plays roll off when the workout plus the time
@@ -121,7 +151,7 @@ and shows what coincided with a track, not what it caused.
 | `STRAVA_CLIENT_ID`, `STRAVA_CLIENT_SECRET` | From your Strava API app. All three Strava values set turns the webhook on. |
 | `STRAVA_WEBHOOK_VERIFY_TOKEN` | Any random string; the same value goes in the subscription create call. |
 | `STRAVA_SUBSCRIPTION_ID` | Optional. Unset, the server looks it up from Strava once. |
-| `STRAVA_WRITE_DESCRIPTIONS` | `true` appends the music summary to each webhook-logged activity. Default off. |
+| `STRAVA_WRITE_DESCRIPTIONS` | `true` writes the music block to each webhook-logged activity. Default off. |
 | `STRAVA_REDIRECT_URI` | For `spotify-mcp-strava-auth`. Default `http://localhost/exchange_token`. |
 | `TEMPO_SERVICE_URL` | tempo-service base URL. Unset turns the fallback off. |
 | `TEMPO_SERVICE_MAX_PER_CALL` | Fallback lookups per tool call. Default `5`. |

@@ -19,6 +19,7 @@ dependencies = [
 spotify-mcp = "spotify_mcp.server:main"
 spotify-mcp-auth = "spotify_mcp.auth_cli:main"
 spotify-mcp-strava-auth = "spotify_mcp.strava_auth_cli:main"
+spotify-mcp-strava-backfill = "spotify_mcp.strava_backfill_cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/spotify_mcp"]
