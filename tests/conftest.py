@@ -25,6 +25,7 @@ class Recorder:
         self.service_bpm: dict[str, float | None] = {}  # title -> bpm; None means 404
         self.service_status: int | None = None
         self.reccobeats_status: int | None = None
+        self.context: str | None = None  # context URI on every recently-played item
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         body = (
@@ -71,7 +72,7 @@ class Recorder:
             return httpx.Response(200, json=track(path.rsplit('/', 1)[1]))
         if path == '/v1/me/player/recently-played':
             items = [
-                {'played_at': at, 'track': {**track(tid), 'duration_ms': dur}, 'context': None}
+                {'played_at': at, 'track': {**track(tid), 'duration_ms': dur}, 'context': {'uri': self.context} if self.context else None}
                 for tid, at, dur in self.recent
             ]
             return httpx.Response(200, json={'items': items})
