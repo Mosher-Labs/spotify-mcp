@@ -19,8 +19,10 @@ claude.ai reaches it with an `X-API-Key` header.
   (in-cluster, `TEMPO_SERVICE_URL`) measures BPM from the iTunes preview, a
   few lookups per call. A source error leaves tracks pending for the next call.
   Cached in SQLite with a `source` per row
-- **Listening log:** a poller stores recently played tracks in
-  `listening.sqlite3` on the data volume
+- **Listening log:** recently played tracks are stored in
+  `listening.sqlite3` on the data volume when a workout is logged. A Strava
+  webhook (`/strava/webhook`, `strava.py`) logs each new activity; the
+  background poller is an optional safety net, off by default
 
 ## Repository Structure
 
@@ -32,6 +34,8 @@ spotify-mcp/
 │   ├── spotify_api.py   # Spotify Web API client
 │   ├── spotify_auth.py  # PKCE and token refresh
 │   ├── auth_cli.py      # spotify-mcp-auth
+│   ├── strava.py        # Strava OAuth, activity fetch, webhook events
+│   ├── strava_auth_cli.py # spotify-mcp-strava-auth
 │   ├── tempo.py         # ReccoBeats + tempo-service lookups and cache
 │   ├── http_auth.py     # X-API-Key / Bearer gate
 │   └── config.py

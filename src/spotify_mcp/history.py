@@ -84,6 +84,9 @@ class ListeningLog:
                 playlist_id TEXT NOT NULL, track_id TEXT NOT NULL,
                 PRIMARY KEY (playlist_id, track_id));
             CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+            CREATE TABLE IF NOT EXISTS strava_events (
+                activity_id TEXT PRIMARY KEY, status TEXT NOT NULL, detail TEXT,
+                updated_at REAL NOT NULL);
             """
         )
         self._db.commit()
@@ -161,9 +164,16 @@ class ListeningLog:
             'last_play': row['last'],
             'last_poll_ok': self.meta('last_poll_ok'),
             'last_poll_error': self.meta('last_poll_error'),
+            'strava_last_event': json.loads(self.meta('strava_last_event') or 'null'),
             'played_at_reading_in_use': self.semantics(),
             'timestamp_fit': self.timestamp_fit(),
         }
+
+    def plays_between(self, start: str, end: str) -> int:
+        """How many stored plays have start <= played_at < end."""
+        return self._db.execute(
+            'SELECT COUNT(*) FROM plays WHERE played_at >= ? AND played_at < ?', (start, end)
+        ).fetchone()[0]
 
     def window_plays(self, start: str, end: str, grace: timedelta) -> list[dict]:
         """Plays in [start, end + grace], annotated using the neighbor outside the window."""
@@ -205,6 +215,31 @@ class ListeningLog:
                  play['completed'], seg.get('label'), seg.get('avg_pace_sec_per_km'),
                  seg.get('avg_hr'), seg.get('avg_cadence')),
             )
+        self._db.commit()
+
+    def rename_workout(self, workout_id: str, name: str, workout_type: str) -> None:
+        self._db.execute(
+            'UPDATE workouts SET name=?, workout_type=? WHERE workout_id=?',
+            (name, workout_type, workout_id))
+        self._db.commit()
+
+    def delete_workout(self, workout_id: str) -> bool:
+        """Drop a workout and its links to plays. Plays and playlists are kept."""
+        self._db.execute('DELETE FROM workout_plays WHERE workout_id=?', (workout_id,))
+        removed = self._db.execute('DELETE FROM workouts WHERE workout_id=?', (workout_id,)).rowcount
+        self._db.commit()
+        return bool(removed)
+
+    # --- strava events --------------------------------------------------
+    def strava_event(self, activity_id: str) -> dict | None:
+        row = self._db.execute(
+            'SELECT * FROM strava_events WHERE activity_id=?', (activity_id,)).fetchone()
+        return dict(row) if row else None
+
+    def set_strava_event(self, activity_id: str, status: str, detail: dict) -> None:
+        self._db.execute(
+            'INSERT OR REPLACE INTO strava_events VALUES (?,?,?,?)',
+            (activity_id, status, json.dumps(detail), time.time()))
         self._db.commit()
 
     def playlist_has(self, playlist_id: str) -> set[str]:
