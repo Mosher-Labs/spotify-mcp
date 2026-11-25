@@ -50,6 +50,7 @@ limit to 10, removed batch track lookups, and moved playlist writes to
 | `log_workout_listening` | After a workout: match the plays in its time window, tie them to it, add the completed ones to the "Workouts" playlist. |
 | `get_track_history`, `get_workout_music_stats`, `listening_status` | What the log says: skips, effort, cadence, tempo bands, keepers. |
 | `create_playlist`, `rename_playlist`, `add_tracks`, `replace_playlist_tracks`, `reorder_tracks`, `remove_tracks` | Edit playlists. Run playlists are named `Run · YYYY-MM-DD · <cadence>`. |
+| `set_strava_description` | Write a Strava activity's description. `mode="append"` (default) adds the text below what is there, once; `mode="replace"` overwrites it. Only listed when the Strava variables are set. |
 
 ## Listening log
 
@@ -79,6 +80,21 @@ the workout only if Strava confirms the activity is gone; plays and the
 playlist are kept. `listening_status` shows the last event in
 `strava_last_event`.
 
+**Music summary.** With `STRAVA_WRITE_DESCRIPTIONS=true`, each newly logged
+activity also gets one line appended to its Strava description, for example:
+
+```text
+🎧 Wiz Khalifa for 4 of 5 tracks. Fastest lap (9:43/mi) on "Financial Advice" → "The Calm"; HR peaked at 156 on "Lost on the Road".
+```
+
+Every number is measured: the plays in the log, the fastest of Strava's laps
+(two or more laps of at least 200 m, foot sports only), and the peak of the
+heart-rate stream, each matched to the song playing at that time. If Strava
+has no laps or no heart rate, that part is left out. A description that
+already holds a 🎧 line is left alone, so retries never add a second line. A
+failed write shows in the event result as `description: error: ...` and does
+not undo the logging.
+
 **The 50-play limit.** At about 3.5 minutes a track, 50 plays is about three
 hours of continuous listening. Plays roll off when the workout plus the time
 until the webhook fires holds more than 50 plays: a one-hour run has about two
@@ -105,6 +121,7 @@ and shows what coincided with a track, not what it caused.
 | `STRAVA_CLIENT_ID`, `STRAVA_CLIENT_SECRET` | From your Strava API app. All three Strava values set turns the webhook on. |
 | `STRAVA_WEBHOOK_VERIFY_TOKEN` | Any random string; the same value goes in the subscription create call. |
 | `STRAVA_SUBSCRIPTION_ID` | Optional. Unset, the server looks it up from Strava once. |
+| `STRAVA_WRITE_DESCRIPTIONS` | `true` appends the music summary to each webhook-logged activity. Default off. |
 | `STRAVA_REDIRECT_URI` | For `spotify-mcp-strava-auth`. Default `http://localhost/exchange_token`. |
 | `TEMPO_SERVICE_URL` | tempo-service base URL. Unset turns the fallback off. |
 | `TEMPO_SERVICE_MAX_PER_CALL` | Fallback lookups per tool call. Default `5`. |
@@ -119,8 +136,10 @@ It prints a URL. Approve in a browser, then paste the address the browser was
 sent to (the page itself fails to load, which is expected).
 
 For the Strava trigger, run `spotify-mcp-strava-auth` the same way. It asks for
-`activity:read_all` (read-only, includes "Only You" activities) and saves
-`strava_token.json` with mode 0600.
+`activity:read_all` (includes "Only You" activities) and `activity:write`
+(needed to change a description), and saves `strava_token.json` with
+mode 0600. A token from before `activity:write` was added can still read but
+not write; run the login again to replace it.
 
 ## Spotify's terms
 

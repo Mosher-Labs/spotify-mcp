@@ -18,6 +18,7 @@ from spotify_mcp.strava import (
     StravaTokenStore,
     WebhookProcessor,
     load_strava_settings,
+    set_strava_description,
 )
 from spotify_mcp.tempo import TempoCache
 
@@ -57,6 +58,8 @@ TOOL_NAMES = (
     'get_track_history',
     'get_workout_music_stats',
 )
+# Registered only when the Strava variables are set.
+STRAVA_TOOL_NAMES = ('set_strava_description',)
 
 
 def build_server(
@@ -71,6 +74,9 @@ def build_server(
     for name in TOOL_NAMES:
         fn = getattr(tools, name)
         mcp.tool(name=name, description=(fn.__doc__ or '').strip() or None)(_bound(fn, services))
+    if strava is not None:
+        fn = set_strava_description
+        mcp.tool(name=fn.__name__, description=(fn.__doc__ or '').strip())(_bound(fn, strava.client))
 
     from starlette.background import BackgroundTask
     from starlette.responses import JSONResponse, PlainTextResponse
