@@ -67,9 +67,9 @@ at once and then:
 
 1. checks `subscription_id` and `owner_id` against its own subscription and
    the logged-in athlete (Strava does not sign events),
-2. fetches the activity from Strava's API for its start time, elapsed time,
+1. fetches the activity from Strava's API for its start time, elapsed time,
    name and sport (nothing in the POST body is used beyond the IDs),
-3. fetches Spotify's 50 most recent plays and runs `log_workout_listening`
+1. fetches Spotify's 50 most recent plays and runs `log_workout_listening`
    for that window, the same as calling the tool.
 
 An activity already logged is skipped, so Strava's retries do nothing. An
