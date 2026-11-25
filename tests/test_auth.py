@@ -40,6 +40,15 @@ def test_token_file_is_private_and_keeps_refresh_token(tmp_path):
     assert json.loads((tmp_path / 'token.json').read_text())['refresh_token'] == 'r'
 
 
+def test_loosened_token_file_is_made_private_again(tmp_path):
+    path = tmp_path / 'token.json'
+    TokenStore(path, 'cid').save_response({'access_token': 'a', 'refresh_token': 'r'})
+    path.chmod(0o660)  # what kubelet's fsGroup pass leaves at pod start
+    store = TokenStore(path, 'cid')
+    store._load()
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
 async def test_expired_token_is_refreshed(tmp_path, recorder):
     store = TokenStore(tmp_path / 'token.json', 'cid')
     store.save_response({'access_token': 'old', 'refresh_token': 'r', 'expires_in': 0})

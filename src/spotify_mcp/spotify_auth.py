@@ -126,7 +126,15 @@ class TokenStore:
                 raise AuthError(
                     'Not logged in to Spotify. Run spotify-mcp-auth (see RUNBOOK.md).'
                 ) from None
+            self._restrict_mode()
         return self._data
+
+    def _restrict_mode(self) -> None:
+        # save_response writes 0600, but something outside the app can loosen
+        # it later: kubelet's fsGroup pass adds group read/write to every file
+        # on the volume when the pod starts. Put it back on each read.
+        if os.stat(self._path).st_mode & 0o077:
+            os.chmod(self._path, 0o600)
 
     def save_response(self, payload: dict) -> None:
         """Store a token response. Spotify may omit refresh_token on refresh."""
