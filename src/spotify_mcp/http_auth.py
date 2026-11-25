@@ -16,9 +16,12 @@ import os
 
 from starlette.responses import JSONResponse
 
+STRAVA_WEBHOOK_PATH = '/strava/webhook'
+
 # Probes carry no Spotify data and are polled by orchestrators that usually
-# cannot attach headers.
-UNAUTHENTICATED_PATHS = frozenset({'/healthz', '/readyz'})
+# cannot attach headers. Strava cannot send a token either; the webhook
+# checks the verify token, subscription ID and owner ID itself (strava.py).
+UNAUTHENTICATED_PATHS = frozenset({'/healthz', '/readyz', STRAVA_WEBHOOK_PATH})
 
 
 def resolve_http_token() -> str | None:

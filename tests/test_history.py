@@ -108,7 +108,7 @@ async def test_per_workout_playlist_is_optional(services, recorder):
 
 async def test_empty_window_explains_itself(services, recorder):
     r = await tools.log_workout_listening(services, 'w0', at(10), at(40))
-    assert r['plays_matched'] == 0 and 'poller' in r['note']
+    assert r['plays_matched'] == 0 and 'rolled off' in r['note']
 
 
 async def test_track_history_and_stats_learn_from_workouts(services, recorder):

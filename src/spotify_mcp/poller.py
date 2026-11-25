@@ -1,4 +1,8 @@
-"""Background poller: copies Spotify's last 50 plays into the listening log."""
+"""Copies Spotify's last 50 plays into the listening log.
+
+poll_once runs whenever a workout is logged (by a tool call or a Strava
+webhook). The background loop is an optional safety net, off by default.
+"""
 
 import asyncio
 import sys
@@ -7,7 +11,7 @@ import time
 
 import httpx
 
-from spotify_mcp.history import ListeningLog
+from spotify_mcp.history import ListeningLog, to_utc
 from spotify_mcp.spotify_api import SpotifyClient
 from spotify_mcp.spotify_auth import TokenStore
 
@@ -16,7 +20,12 @@ async def poll_once(spotify: SpotifyClient, log: ListeningLog) -> int:
     """Fetch the latest 50 plays and store the new ones. Records success or error."""
     try:
         body = await spotify.request('GET', '/me/player/recently-played', params={'limit': 50})
-        new = log.add_plays(body.get('items', []))
+        items = body.get('items', [])
+        new = log.add_plays(items)
+        # Lets the Strava webhook tell whether the 50-play window reached back
+        # to the start of a workout.
+        log.set_meta('last_poll_count', str(len(items)))
+        log.set_meta('last_poll_oldest', min((to_utc(i['played_at']) for i in items), default=''))
         log.set_meta('last_poll_ok', time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
         log.set_meta('last_poll_error', '')
         # Settle which reading of played_at fits the data once there is enough of it.

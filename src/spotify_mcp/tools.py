@@ -389,7 +389,7 @@ async def log_workout_listening(
         result['note'] = poll_note
     if not plays:
         result['note'] = (result.get('note', '') + ' No plays in that window. Spotify keeps only the '
-                          'last 50 and the poller may not have been running.').strip()
+                          'last 50 plays, so older ones may have rolled off.').strip()
         return result
 
     keep = list(dict.fromkeys(p['track_id'] for p in plays if p['completed'] != 0))
@@ -416,7 +416,7 @@ async def log_workout_listening(
 
 
 async def listening_status(s: Services) -> dict:
-    """Health of the listening log: counts, last poll, and how played_at is being read."""
+    """Health of the listening log: counts, last poll, last Strava event, and how played_at is read."""
     return s.log.status()
 
 

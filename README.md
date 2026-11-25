@@ -53,12 +53,39 @@ limit to 10, removed batch track lookups, and moved playlist writes to
 
 ## Listening log
 
-Spotify's recently-played endpoint holds only the last 50 plays. A poller
-thread copies them into `listening.sqlite3` on the data volume every 10
-minutes (`SPOTIFY_MCP_POLL_SECONDS`, 0 turns it off). `log_workout_listening`
-ties the plays in a workout's window to that workout. The log never leaves the
-volume, and nothing in it is sent anywhere except to Claude when a tool is
-called. Delete `listening.sqlite3` to erase it.
+Spotify's recently-played endpoint holds only the last 50 plays. They are
+copied into `listening.sqlite3` on the data volume whenever a workout is
+logged. `log_workout_listening` ties the plays in a workout's window to that
+workout. The log never leaves the volume, and nothing in it is sent anywhere
+except to Claude when a tool is called. Delete `listening.sqlite3` to erase it.
+
+### Strava trigger
+
+With the Strava variables set, a Strava push subscription logs every new
+activity on its own. Strava POSTs to `/strava/webhook`; the server answers 200
+at once and then:
+
+1. checks `subscription_id` and `owner_id` against its own subscription and
+   the logged-in athlete (Strava does not sign events),
+2. fetches the activity from Strava's API for its start time, elapsed time,
+   name and sport (nothing in the POST body is used beyond the IDs),
+3. fetches Spotify's 50 most recent plays and runs `log_workout_listening`
+   for that window, the same as calling the tool.
+
+An activity already logged is skipped, so Strava's retries do nothing. An
+`update` renames a logged workout, or logs an activity that was missed while
+the server was down (editing the title in Strava retries it). A `delete` drops
+the workout only if Strava confirms the activity is gone; plays and the
+playlist are kept. `listening_status` shows the last event in
+`strava_last_event`.
+
+**The 50-play limit.** At about 3.5 minutes a track, 50 plays is about three
+hours of continuous listening. Plays roll off when the workout plus the time
+until the webhook fires holds more than 50 plays: a one-hour run has about two
+hours of margin, a 2.5-hour long run under 30 minutes. If the fetch was full
+and does not reach back to the start of the workout, the event result carries
+a `possible_gap` note. Set `SPOTIFY_MCP_POLL_SECONDS=3600` to turn on the
+background poll as a safety net; hourly is well inside the three-hour window.
 
 Skips are inferred from the time between consecutive plays, because Spotify
 reports no play length. The learning is plain tables and aggregate queries,
@@ -74,7 +101,11 @@ and shows what coincided with a track, not what it caused.
 | `SPOTIFY_MCP_HTTP_TOKEN` | Required unless bound to loopback. Sent as `X-API-Key` or `Authorization: Bearer`. |
 | `SPOTIFY_MCP_HOST`, `SPOTIFY_MCP_PORT` | Default `127.0.0.1`, `8000`. |
 | `SPOTIFY_MCP_STATELESS_HTTP` | Default `true`. |
-| `SPOTIFY_MCP_POLL_SECONDS` | Play-log poll interval. Default `600`; `0` disables. |
+| `SPOTIFY_MCP_POLL_SECONDS` | Background play-log poll interval. Default `0` (off). |
+| `STRAVA_CLIENT_ID`, `STRAVA_CLIENT_SECRET` | From your Strava API app. All three Strava values set turns the webhook on. |
+| `STRAVA_WEBHOOK_VERIFY_TOKEN` | Any random string; the same value goes in the subscription create call. |
+| `STRAVA_SUBSCRIPTION_ID` | Optional. Unset, the server looks it up from Strava once. |
+| `STRAVA_REDIRECT_URI` | For `spotify-mcp-strava-auth`. Default `http://localhost/exchange_token`. |
 | `TEMPO_SERVICE_URL` | tempo-service base URL. Unset turns the fallback off. |
 | `TEMPO_SERVICE_MAX_PER_CALL` | Fallback lookups per tool call. Default `5`. |
 
@@ -86,6 +117,10 @@ spotify-mcp-auth
 
 It prints a URL. Approve in a browser, then paste the address the browser was
 sent to (the page itself fails to load, which is expected).
+
+For the Strava trigger, run `spotify-mcp-strava-auth` the same way. It asks for
+`activity:read_all` (read-only, includes "Only You" activities) and saves
+`strava_token.json` with mode 0600.
 
 ## Spotify's terms
 
