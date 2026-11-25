@@ -217,6 +217,35 @@ class ListeningLog:
             )
         self._db.commit()
 
+    def workout_play_spans(self, workout_id: str) -> list[dict]:
+        """A logged workout's plays in order, each with the UTC span it played.
+
+        The span runs for the play's listened time (or the track length when
+        that is unknown), from played_at back or forward depending on which
+        reading of played_at is in use.
+        """
+        rows = self._db.execute(
+            """SELECT wp.played_at, wp.track_id, wp.listened_ms, p.name, p.artists, p.duration_ms
+               FROM workout_plays wp
+               JOIN plays p ON p.played_at = wp.played_at AND p.track_id = wp.track_id
+               WHERE wp.workout_id=? ORDER BY wp.played_at""",
+            (workout_id,),
+        ).fetchall()
+        sem = self.semantics()
+        out = []
+        for r in rows:
+            length = timedelta(milliseconds=r['listened_ms'] or r['duration_ms'] or 0)
+            at = _dt(r['played_at'])
+            start, end = (at - length, at) if sem == 'end' else (at, at + length)
+            out.append({
+                'track_id': r['track_id'],
+                'name': r['name'] or '',
+                'artists': json.loads(r['artists'] or '[]'),
+                'start': start,
+                'end': end,
+            })
+        return out
+
     def rename_workout(self, workout_id: str, name: str, workout_type: str) -> None:
         self._db.execute(
             'UPDATE workouts SET name=?, workout_type=? WHERE workout_id=?',

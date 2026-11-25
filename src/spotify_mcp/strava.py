@@ -9,9 +9,14 @@ Strava does not sign events, so nothing in the payload is trusted beyond
 "look at activity N": the subscription and owner IDs must match ours, and the
 start time, duration and name come from Strava's API, not the POST body.
 
+With activity:write, ``set_strava_description`` edits an activity's
+description, and STRAVA_WRITE_DESCRIPTIONS=true appends a one-line music
+summary after each webhook-logged activity.
+
 Docs (checked 2026-11-25):
 https://developers.strava.com/docs/webhooks/
 https://developers.strava.com/docs/authentication/
+https://developers.strava.com/docs/reference/#api-Activities-updateActivityById
 """
 
 import asyncio
@@ -35,9 +40,17 @@ TOKEN_URL = 'https://www.strava.com/oauth/token'
 API = 'https://www.strava.com/api/v3'
 DEFAULT_REDIRECT_URI = 'http://localhost/exchange_token'
 
-# Read-only. activity:read_all also covers "Only You" activities; with only
+# activity:read_all also covers "Only You" activities; with only
 # activity:read, Strava sends a delete event when an activity turns private.
-SCOPE = 'activity:read_all'
+# activity:write is what PUT /activities/{id} needs to change a description.
+SCOPES = ('activity:read_all', 'activity:write')
+SCOPE = ','.join(SCOPES)
+
+# Marks the automatic music summary; its presence means "already written".
+SUMMARY_MARK = '🎧'
+METERS_PER_MILE = 1609.344
+# Laps shorter than this are button-press stubs, not intervals.
+_MIN_LAP_METERS = 200
 
 _EXPIRY_SKEW_SECONDS = 60
 
@@ -57,6 +70,8 @@ class StravaSettings:
     token_path: Path
     # Optional: when unset, the server asks Strava for its subscription ID.
     subscription_id: int | None = None
+    # Append a music summary to each webhook-logged activity's description.
+    write_descriptions: bool = False
 
 
 def load_strava_settings(data_dir: Path) -> StravaSettings | None:
@@ -73,6 +88,8 @@ def load_strava_settings(data_dir: Path) -> StravaSettings | None:
         verify_token=verify,
         token_path=data_dir / 'strava_token.json',
         subscription_id=int(sub) if sub else None,
+        write_descriptions=os.getenv('STRAVA_WRITE_DESCRIPTIONS', '').strip().lower()
+        in ('1', 'true', 'yes'),
     )
 
 
@@ -95,18 +112,19 @@ def code_from_redirect(redirected_url: str, expected_state: str) -> str:
     """The authorization code from the URL Strava redirected to.
 
     Strava lets the athlete untick scopes on the consent page, so the granted
-    scope is checked too.
+    scopes are checked too.
     """
     query = parse_qs(urlparse(redirected_url.strip()).query)
     if 'error' in query:
         raise StravaError(f"Strava returned an error: {query['error'][0]}")
     if query.get('state', [''])[0] != expected_state:
         raise StravaError('State mismatch: paste the URL from this login attempt.')
-    granted = set(query.get('scope', [''])[0].split(','))
-    if SCOPE not in granted:
+    granted = set(query.get('scope', [''])[0].replace(' ', ',').split(','))
+    missing = [s for s in SCOPES if s not in granted]
+    if missing:
         raise StravaError(
-            f"Strava granted {sorted(granted)}, not {SCOPE}. Log in again and leave "
-            '"View data about your private activities" ticked.'
+            f"Strava granted {sorted(granted)}, missing {missing}. Log in again and leave "
+            '"View data about your private activities" and "Upload your activities" ticked.'
         )
     code = query.get('code', [''])[0]
     if not code:
@@ -207,22 +225,59 @@ class StravaClient:
         self._http = http
         self._subscription_id = settings.subscription_id
 
-    async def activity(self, activity_id: int) -> dict | None:
-        """GET /activities/{id}; None when Strava says it does not exist."""
+    async def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
+        """Call the API with the athlete's token, refreshing it once on a 401."""
         for attempt in (0, 1):
             token = await self.tokens.access_token(self._http, force=attempt == 1)
-            response = await self._http.get(
-                f"{API}/activities/{activity_id}",
-                headers={'Authorization': f"Bearer {token}"},
+            response = await self._http.request(
+                method, f"{API}{path}", headers={'Authorization': f"Bearer {token}"}, **kwargs
             )
             if response.status_code == 401 and attempt == 0:
                 continue
-            break
+            return response
+        return response
+
+    async def activity(self, activity_id: int) -> dict | None:
+        """GET /activities/{id}; None when Strava says it does not exist."""
+        response = await self._request('GET', f"/activities/{activity_id}")
         if response.status_code == 404:
             return None
         if response.status_code >= 400:
             raise StravaError(f"Strava GET activity failed ({response.status_code}): {response.text[:300]}")
         return response.json()
+
+    async def set_description(self, activity_id: int, description: str) -> dict:
+        """PUT /activities/{id} with a new description. Needs activity:write."""
+        response = await self._request(
+            'PUT', f"/activities/{activity_id}", json={'description': description}
+        )
+        if response.status_code >= 400:
+            hint = ''
+            if response.status_code in (401, 403):
+                hint = ' The token may lack activity:write; run spotify-mcp-strava-auth again.'
+            raise StravaError(
+                f"Strava PUT activity failed ({response.status_code}): {response.text[:300]}.{hint}"
+            )
+        return response.json()
+
+    async def laps(self, activity_id: int) -> list[dict]:
+        response = await self._request('GET', f"/activities/{activity_id}/laps")
+        if response.status_code >= 400:
+            raise StravaError(f"Strava GET laps failed ({response.status_code})")
+        return response.json() or []
+
+    async def streams(self, activity_id: int, keys: list[str]) -> dict:
+        """Streams keyed by type, e.g. {'time': {'data': [...]}, 'heartrate': {...}}."""
+        response = await self._request(
+            'GET', f"/activities/{activity_id}/streams",
+            params={'keys': ','.join(keys), 'key_by_type': 'true'},
+        )
+        if response.status_code == 404:
+            return {}
+        if response.status_code >= 400:
+            raise StravaError(f"Strava GET streams failed ({response.status_code})")
+        body = response.json()
+        return body if isinstance(body, dict) else {}
 
     @property
     def known_subscription_id(self) -> int | None:
@@ -242,6 +297,132 @@ class StravaClient:
             # One subscription per app, per the webhook docs.
             self._subscription_id = int(subs[0]['id']) if subs else None
         return self._subscription_id
+
+
+# --- Descriptions ----------------------------------------------------------
+
+async def set_strava_description(
+    client: StravaClient, activity_id: int, text: str, mode: str = 'append'
+) -> dict:
+    """Write text into a Strava activity's description and return the result.
+
+    mode "append" (default) adds text below the existing description after a
+    blank line, and does nothing if that exact text is already there, so
+    calling it twice is safe. mode "replace" overwrites the description.
+    """
+    if mode not in ('append', 'replace'):
+        raise ValueError('mode must be "append" or "replace"')
+    text = text.strip()
+    if not text and mode == 'append':
+        raise ValueError('text is empty')
+    activity = await client.activity(int(activity_id))
+    if activity is None:
+        raise StravaError(f"Strava activity {activity_id} not found.")
+    current = activity.get('description') or ''
+    if mode == 'replace':
+        new = text
+    elif text in current:
+        new = current
+    else:
+        new = f"{current.rstrip()}\n\n{text}" if current.strip() else text
+    if new == current:
+        return {'activity_id': int(activity_id), 'changed': False, 'description': current}
+    updated = await client.set_description(int(activity_id), new)
+    return {
+        'activity_id': int(activity_id),
+        'changed': True,
+        'description': updated.get('description', new) if isinstance(updated, dict) else new,
+    }
+
+
+def _parse_time(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace('Z', '+00:00')).astimezone(timezone.utc)
+
+
+def _quoted(spans: list[dict]) -> str:
+    return ' → '.join(f'"{s["name"]}"' for s in spans)
+
+
+def _song_at(spans: list[dict], moment: datetime) -> dict | None:
+    return next((s for s in spans if s['start'] <= moment <= s['end']), None)
+
+
+def _songs_during(spans: list[dict], start: datetime, end: datetime, limit: int = 3) -> list[dict]:
+    """Songs that played for at least 30 s of [start, end], the longest ones, in play order."""
+    overlaps = []
+    for i, s in enumerate(spans):
+        seconds = (min(s['end'], end) - max(s['start'], start)).total_seconds()
+        if seconds >= 30:
+            overlaps.append((seconds, i, s))
+    longest = sorted(overlaps, key=lambda o: -o[0])[:limit]
+    return [s for _, _, s in sorted(longest, key=lambda o: o[1])]
+
+
+def _pace_per_mile(speed: float) -> str:
+    seconds = round(METERS_PER_MILE / speed)
+    return f"{seconds // 60}:{seconds % 60:02d}/mi"
+
+
+def tracks_phrase(spans: list[dict]) -> str:
+    """'Wiz Khalifa for 14 of 15 tracks.' or '11 tracks, Snoop Dogg to Lil Jon.'"""
+    total = len(spans)
+    if total == 1:
+        return f'1 track, "{spans[0]["name"]}".'
+    artists = [(s['artists'] or ['?'])[0] for s in spans]
+    top = max(set(artists), key=artists.count)
+    count = artists.count(top)
+    if count == total:
+        return f"{total} tracks, all {top}."
+    if count * 2 > total:
+        return f"{top} for {count} of {total} tracks."
+    if artists[0] == artists[-1]:
+        return f"{total} tracks."
+    return f"{total} tracks, {artists[0]} to {artists[-1]}."
+
+
+def fastest_lap_phrase(activity: dict, laps: list[dict], spans: list[dict]) -> str | None:
+    """'Fastest lap (9:43/mi) on "A" → "B"', from Strava's own laps.
+
+    Needs two or more laps: one lap is the whole activity, not an interval.
+    """
+    if activity.get('sport_type') not in _FOOT_SPORTS:
+        return None
+    real = [lap for lap in laps if (lap.get('distance') or 0) >= _MIN_LAP_METERS
+            and (lap.get('average_speed') or 0) > 0 and lap.get('start_date')]
+    if len(real) < 2:
+        return None
+    lap = max(real, key=lambda lap: lap['average_speed'])
+    start = _parse_time(lap['start_date'])
+    songs = _songs_during(spans, start, start + timedelta(seconds=int(lap.get('elapsed_time') or 0)))
+    phrase = f"Fastest lap ({_pace_per_mile(lap['average_speed'])})"
+    return f"{phrase} on {_quoted(songs)}" if songs else phrase
+
+
+def peak_hr_phrase(activity: dict, streams: dict, spans: list[dict]) -> str | None:
+    """'HR peaked at 156 on "Song"', from the heart-rate stream."""
+    hr = (streams.get('heartrate') or {}).get('data') or []
+    times = (streams.get('time') or {}).get('data') or []
+    if not hr or len(hr) != len(times):
+        return None
+    peak = max(hr)
+    if not 30 <= peak <= 230:
+        return None
+    # The time stream counts seconds from the activity's start.
+    moment = _parse_time(activity['start_date']) + timedelta(seconds=times[hr.index(peak)])
+    song = _song_at(spans, moment)
+    return f"HR peaked at {peak} on {_quoted([song])}" if song else f"HR peaked at {peak}"
+
+
+def build_summary(activity: dict, spans: list[dict], laps: list[dict], streams: dict) -> str | None:
+    """The one-line music summary, from measured data only. None with no plays."""
+    if not spans:
+        return None
+    parts = [p for p in (fastest_lap_phrase(activity, laps, spans),
+                         peak_hr_phrase(activity, streams, spans)) if p]
+    line = f"{SUMMARY_MARK} {tracks_phrase(spans)}"
+    if parts:
+        line += ' ' + '; '.join(parts) + '.'
+    return line
 
 
 # --- Webhook events --------------------------------------------------------
@@ -389,8 +570,37 @@ class WebhookProcessor:
             # it retryable: a Strava retry or a title edit runs it again.
             result['status'] = 'error'
             result['error'] = self.s.log.meta('last_poll_error')
+        elif self.settings.write_descriptions and logged['plays_matched']:
+            result['description'] = await self.write_summary(activity, key)
         self.s.log.set_strava_event(key, result['status'], result)
         return result
+
+    async def write_summary(self, activity: dict, key: str) -> str:
+        """Append the music summary unless one is there already. Returns what happened.
+
+        Laps and streams are optional: if Strava fails on either, that part of
+        the line is left out. A failure to write never fails the logging.
+        """
+        if SUMMARY_MARK in (activity.get('description') or ''):
+            return 'skipped: summary already present'
+        aid = int(activity['id'])
+        spans = self.s.log.workout_play_spans(key)
+        try:
+            laps = await self.client.laps(aid)
+        except (StravaError, httpx.HTTPError):
+            laps = []
+        try:
+            streams = await self.client.streams(aid, ['time', 'heartrate'])
+        except (StravaError, httpx.HTTPError):
+            streams = {}
+        line = build_summary(activity, spans, laps, streams)
+        if not line:
+            return 'skipped: no plays'
+        try:
+            await set_strava_description(self.client, aid, line)
+        except (StravaError, httpx.HTTPError) as exc:
+            return f"error: {str(exc)[:200]}"
+        return 'written'
 
     def possible_gap(self, start_at: str) -> str | None:
         """Explain if plays from the start of the workout may have rolled off.
